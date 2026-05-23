@@ -1,4 +1,8 @@
 // app/(tabs)/chat.tsx
+import { IconSymbol } from '@/components/ui/icon-symbol';
+import { Colors, Fonts } from '@/constants/theme';
+import { useColorScheme } from '@/hooks/use-color-scheme';
+import { chatWithGemini } from '@/services/gemini';
 import * as Haptics from 'expo-haptics';
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -17,11 +21,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Colors, Fonts } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
-import { chatWithGemini } from '@/services/gemini';
-
 const { width } = Dimensions.get('window');
 
 interface Message {
@@ -29,6 +28,9 @@ interface Message {
     role: 'user' | 'assistant';
     content: string;
     timestamp: Date;
+    isTyping?: boolean;
+    fullContent?: string;
+    isThinking?: boolean; // явный флаг для индикатора "думает"
 }
 
 const WELCOME_MESSAGE = `Сәлеметсіз бе! Мен SholpyAI көмекшісімін. Мағжан Жұмабаевтың «Шолпы» өлеңі, оның тәрбиелік мәні, ұлттық болмысы туралы кез келген сұрағыңызға жауап беремін. Не туралы сұрағыңыз келеді?`;
@@ -49,6 +51,8 @@ export default function ChatScreen() {
     const fadeAnim = useRef(new Animated.Value(0)).current;
     const quotaAnim = useRef(new Animated.Value(0)).current;
     const inputRef = useRef<TextInput>(null);
+    const typingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const currentTypingIdRef = useRef<string | null>(null);
 
     useEffect(() => {
         Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
@@ -57,6 +61,7 @@ export default function ChatScreen() {
         return () => {
             showSub.remove();
             hideSub.remove();
+            if (typingIntervalRef.current) clearInterval(typingIntervalRef.current);
         };
     }, []);
 
@@ -72,6 +77,48 @@ export default function ChatScreen() {
 
     const scrollToBottom = () => {
         setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    };
+
+    const clearTypingInterval = () => {
+        if (typingIntervalRef.current) {
+            clearInterval(typingIntervalRef.current);
+            typingIntervalRef.current = null;
+        }
+        currentTypingIdRef.current = null;
+    };
+
+    const startTyping = (messageId: string, fullText: string) => {
+        // Очищаем предыдущий интервал, если был
+        clearTypingInterval();
+        
+        let currentIndex = 0;
+        const charsPerStep = 2;
+        const intervalMs = 25;
+        currentTypingIdRef.current = messageId;
+
+        typingIntervalRef.current = setInterval(() => {
+            setMessages(prev =>
+                prev.map(msg => {
+                    if (msg.id !== messageId) return msg;
+                    const nextIndex = Math.min(currentIndex + charsPerStep, fullText.length);
+                    const newContent = fullText.slice(0, nextIndex);
+                    currentIndex = nextIndex;
+                    const finished = currentIndex >= fullText.length;
+                    return {
+                        ...msg,
+                        content: newContent,
+                        isTyping: !finished,
+                        fullContent: finished ? undefined : fullText,
+                    };
+                })
+            );
+
+            if (currentIndex >= fullText.length) {
+                clearTypingInterval();
+            }
+
+            scrollToBottom();
+        }, intervalMs);
     };
 
     const addMessage = (role: 'user' | 'assistant', content: string) => {
@@ -98,7 +145,13 @@ export default function ChatScreen() {
 
         // Индикатор "думает"
         const thinkingId = Date.now().toString() + '-thinking';
-        setMessages(prev => [...prev, { id: thinkingId, role: 'assistant', content: '', timestamp: new Date(), isThinking: true } as any]);
+        setMessages(prev => [...prev, {
+            id: thinkingId,
+            role: 'assistant',
+            content: '',
+            timestamp: new Date(),
+            isThinking: true,
+        }]);
         scrollToBottom();
 
         setIsLoading(true);
@@ -106,8 +159,22 @@ export default function ChatScreen() {
 
         try {
             const reply = await chatWithGemini(trimmed);
-            setMessages(prev => prev.filter(m => m.id !== thinkingId));
-            addMessage('assistant', reply);
+            // Удаляем thinking, создаём сообщение для печати
+            const newMsgId = Date.now().toString();
+            setMessages(prev => {
+                const filtered = prev.filter(m => m.id !== thinkingId);
+                const newMsg: Message = {
+                    id: newMsgId,
+                    role: 'assistant',
+                    content: '',
+                    timestamp: new Date(),
+                    isTyping: true,
+                    fullContent: reply,
+                };
+                return [...filtered, newMsg];
+            });
+            // Запускаем печать
+            startTyping(newMsgId, reply);
         } catch (error: any) {
             setMessages(prev => prev.filter(m => m.id !== thinkingId));
             if (error.message?.includes('QUOTA_EXCEEDED') || error.message?.includes('429')) {
@@ -125,11 +192,13 @@ export default function ChatScreen() {
 
     const handleClearHistory = () => {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        clearTypingInterval();
         setMessages([{ id: 'welcome-new', role: 'assistant', content: WELCOME_MESSAGE, timestamp: new Date() }]);
     };
 
-    const renderMessage = ({ item }: { item: Message & { isThinking?: boolean } }) => {
-        if ((item as any).isThinking) {
+    const renderMessage = ({ item }: { item: Message }) => {
+        // Индикатор "думает"
+        if (item.isThinking) {
             return (
                 <Animated.View style={[styles.messageContainer, styles.assistantMessageContainer, { opacity: fadeAnim }]}>
                     <View style={styles.avatarContainer}>
@@ -146,6 +215,8 @@ export default function ChatScreen() {
         }
 
         const isUser = item.role === 'user';
+        const showCursor = item.isTyping && (item.fullContent?.length ?? 0) > item.content.length;
+
         return (
             <Animated.View style={[styles.messageContainer, isUser ? styles.userMessageContainer : styles.assistantMessageContainer, { opacity: fadeAnim }]}>
                 {!isUser && (
@@ -156,7 +227,10 @@ export default function ChatScreen() {
                     </View>
                 )}
                 <View style={[styles.messageBubble, isUser ? styles.userBubble : styles.assistantBubble]}>
-                    <Text style={[styles.messageText, isUser && styles.userMessageText]}>{item.content}</Text>
+                    <Text style={[styles.messageText, isUser && styles.userMessageText]}>
+                        {item.content}
+                        {showCursor && <Text style={styles.cursor}> ▌</Text>}
+                    </Text>
                 </View>
             </Animated.View>
         );
@@ -239,6 +313,7 @@ const createStyles = (theme: any) =>
         thinkingText: { fontSize: 15, color: theme.textSecondary },
         messageText: { fontSize: 15, lineHeight: 22, fontFamily: Fonts.ios?.sans, color: theme.text },
         userMessageText: { color: '#FFFFFF' },
+        cursor: { color: theme.primary, fontWeight: 'bold' },
         inputContainer: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 16, paddingVertical: 12, borderTopWidth: 1, borderTopColor: theme.border },
         input: { flex: 1, minHeight: 40, maxHeight: 120, paddingHorizontal: 16, paddingVertical: 10, fontSize: 16, fontFamily: Fonts.ios?.sans, backgroundColor: theme.background, borderRadius: 24, borderWidth: 1, borderColor: theme.border, marginRight: 12 },
         sendButton: { width: 44, height: 44, borderRadius: 22, justifyContent: 'center', alignItems: 'center' },

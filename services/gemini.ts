@@ -1,5 +1,11 @@
 // services/gemini.ts
-// Полный список моделей (не трогать)
+/**
+ * SholpyAI – Gemini API интеграциясы
+ * 
+ * Қолдау көрсетілетін модельдердің толық тізімі, қате жағдайларын өңдеу,
+ * тест сұрақтарын генерациялау және тақырыптық чат.
+ */
+
 export type GeminiModel =
   | 'gemini-3.1-pro-preview-customtools'
   | 'gemini-3.1-pro-preview'
@@ -14,7 +20,6 @@ export type GeminiModel =
   | 'gemini-1.5-flash'
   | 'gemini-1.5-flash-8b'
   | 'gemini-3.1-flash-lite-preview'
-  | 'gemini-3.1-flash-lite'
   | 'gemini-3-flash-preview'
   | 'gemini-flash-latest';
 
@@ -48,7 +53,9 @@ export interface QuizQuestion {
 
 const API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY;
 
-// Приоритет – сначала Flash-модели для скорости и экономии
+/**
+ * Модельдердің басымдық тізімі – алдымен жылдам әрі үнемді Flash модельдер.
+ */
 const MODEL_FALLBACK_ORDER: GeminiModel[] = [
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
@@ -58,7 +65,6 @@ const MODEL_FALLBACK_ORDER: GeminiModel[] = [
   'gemini-1.5-flash-8b',
   'gemini-3-flash',
   'gemini-3.1-flash-lite-preview',
-  'gemini-3.1-flash-lite',
   'gemini-3-flash-preview',
   'gemini-2.5-pro',
   'gemini-3.1-pro-preview',
@@ -72,16 +78,20 @@ const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 /**
- * Основной вызов с последовательным перебором моделей.
- * При 429 (quota) или 503 (unavailable) переходит к следующей модели.
+ * Негізгі сұрау функциясы. Берілген модельдер тізімін ретімен сынап,
+ * бірінші жұмыс істеген модельдің нәтижесін қайтарады.
+ * 429 (квота таусылды) және 503 (қызмет қолжетімсіз) қателері кезінде
+ * келесі модельге өтеді.
  */
 export async function generateWithGemini(req: GeminiRequest): Promise<GeminiResponse> {
-  if (!API_KEY) throw new Error('GEMINI_API_KEY is not set in .env');
+  if (!API_KEY) {
+    throw new Error('GEMINI_API_KEY is not set in .env (use EXPO_PUBLIC_GEMINI_API_KEY)');
+  }
 
   const {
     prompt,
     systemInstruction,
-    temperature = 0.5,
+    temperature = 0.7,
     maxOutputTokens = 256,
     topP,
     topK,
@@ -101,44 +111,52 @@ export async function generateWithGemini(req: GeminiRequest): Promise<GeminiResp
       }
       contents.push({ role: 'user', parts: [{ text: prompt }] });
 
-      const config: any = { temperature, maxOutputTokens };
-      if (topP !== undefined) config.topP = topP;
-      if (topK !== undefined) config.topK = topK;
+      const generationConfig: any = { temperature, maxOutputTokens };
+      if (topP !== undefined) generationConfig.topP = topP;
+      if (topK !== undefined) generationConfig.topK = topK;
 
-      const resp = await fetch(url, {
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents, generationConfig: config }),
+        body: JSON.stringify({ contents, generationConfig }),
       });
 
-      if (!resp.ok) {
-        const errText = await resp.text();
-        // При исчерпании квоты или недоступности сервиса пробуем следующую модель
-        if (resp.status === 429 || resp.status === 503) {
-          console.warn(`Model ${model} ${resp.status === 429 ? 'quota exceeded' : 'unavailable'}, trying next...`);
-          lastError = new Error(`${resp.status}: ${errText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        // 429 – квота бітті, 503 – сервис уақытша қолжетімсіз
+        if (response.status === 429 || response.status === 503) {
+          console.warn(`Model ${model} ${response.status === 429 ? 'quota exceeded' : 'unavailable'}, trying next...`);
+          lastError = new Error(`${response.status}: ${errorText}`);
           continue;
         }
-        throw new Error(`HTTP ${resp.status}: ${errText}`);
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
       }
 
-      const data = await resp.json();
+      const data = await response.json();
       const candidate = data.candidates?.[0];
-      if (!candidate) throw new Error('No candidates in response');
+      if (!candidate) {
+        throw new Error('No candidates in response');
+      }
+
       const text = candidate.content?.parts?.[0]?.text || '';
-      if (!text) throw new Error('Empty response text');
+      if (!text) {
+        throw new Error('Empty response text');
+      }
 
       return { text, modelUsed: model, usageMetadata: data.usageMetadata };
-    } catch (e) {
-      console.warn(`Model ${model} failed:`, e);
-      lastError = e instanceof Error ? e : new Error(String(e));
+    } catch (error) {
+      console.warn(`Model ${model} failed:`, error);
+      lastError = error instanceof Error ? error : new Error(String(error));
     }
   }
 
   throw new Error(`All models failed. Last error: ${lastError?.message}`);
 }
 
-// ---------- Генерация теста (10 вопросов) ----------
+// ----------------------------------------------------------------------
+// Тест сұрақтарын генерациялау (10 сұрақ)
+// ----------------------------------------------------------------------
+
 const QUIZ_SYSTEM = `Сен – қазақ әдебиетінің маманы. Мағжан Жұмабаевтың «Шолпы» өлеңі бойынша 10 сұрақтан тұратын тест дайында.
 Әр сұрақ 4 нұсқадан тұрады. JSON массиві:
 [{"id":1,"question":"...","options":["...",...],"correctOptionIndex":0,"explanation":"..."}]
@@ -147,11 +165,13 @@ const QUIZ_SYSTEM = `Сен – қазақ әдебиетінің маманы. 
 function extractJson(text: string): string {
   const match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   if (match) return match[1].trim();
+
   const start = text.indexOf('[');
   const end = text.lastIndexOf(']');
   if (start !== -1 && end !== -1 && end > start) {
     return text.substring(start, end + 1).trim();
   }
+
   return text.trim();
 }
 
@@ -159,7 +179,6 @@ function safeParseJsonArray(str: string): any[] {
   try {
     return JSON.parse(str);
   } catch {
-    // Если JSON оборван, пробуем добавить закрывающую скобку
     if (!str.endsWith(']')) str += ']';
     try {
       return JSON.parse(str);
@@ -174,8 +193,8 @@ export async function generateQuizQuestions(count: number = 10): Promise<QuizQue
     const resp = await generateWithGemini({
       prompt: `«Шолпы» өлеңі және Мағжан Жұмабаев туралы ${count} тест сұрағын генерацияла.`,
       systemInstruction: QUIZ_SYSTEM,
-      temperature: 0.5,
-      maxOutputTokens: 2048, // достаточно для 10 вопросов
+      temperature: 0.7,
+      maxOutputTokens: 2048,
     });
 
     const json = extractJson(resp.text);
@@ -189,8 +208,8 @@ export async function generateQuizQuestions(count: number = 10): Promise<QuizQue
       correctOptionIndex: q.correctOptionIndex ?? 0,
       explanation: q.explanation || '',
     }));
-  } catch (e) {
-    console.warn('Quiz generation failed, using fallback', e);
+  } catch (error) {
+    console.warn('Quiz generation failed, using fallback', error);
     return getFallbackQuestions();
   }
 }
@@ -210,17 +229,21 @@ function getFallbackQuestions(): QuizQuestion[] {
   ];
 }
 
-// ---------- Чат (512 токенов, жёсткий контекст) ----------
-const CHAT_SYSTEM = `Сен – SholpyAI көмекшісі. Саған қойылатын сұрақтар тек Мағжан Жұмабаевтың «Шолпы» өлеңі, оның тәрбиелік мәні, ұлттық болмысы, қазақ әдебиетіндегі орны туралы. 
-Егер сұрақ тақырыптан тыс болса, «Кешіріңіз, мен тек «Шолпы» өлеңі және Мағжан Жұмабаев туралы сұрақтарға жауап бере аламын» деп жауап бер.
+// ----------------------------------------------------------------------
+// Чат (тақырып шектеуімен)
+// ----------------------------------------------------------------------
+
+const CHAT_SYSTEM = `Сен – SholpyAI көмекшісі. Саған қойылатын сұрақтар тек Мағжан Жұмабаевтың өмірі, шығармашылығы, «Шолпы» өлеңі, оның тәрбиелік мәні, ұлттық болмысы және қазақ әдебиетіндегі орны туралы болуы керек.
+Мағжанның туған жылы, білімі, қайда оқығаны, қандай шығармалары бар – мұның бәрі рұқсат етілген сұрақтар.
+Егер сұрақ мүлдем басқа тақырыпта болса (мысалы, ауа райы, спорт, саясат), онда «Кешіріңіз, мен тек Мағжан Жұмабаев және «Шолпы» өлеңі туралы сұрақтарға жауап бере аламын» деп жауап бер.
 Қазақша жауап бер. Жауап қысқа, бірақ мазмұнды болсын.`;
 
 export async function chatWithGemini(userMsg: string): Promise<string> {
   const resp = await generateWithGemini({
     prompt: userMsg,
     systemInstruction: CHAT_SYSTEM,
-    temperature: 0.3,
-    maxOutputTokens: 512, // достаточно для развёрнутого, но экономного ответа
+    temperature: 0.4,
+    maxOutputTokens: 512,
   });
   return resp.text;
 }
